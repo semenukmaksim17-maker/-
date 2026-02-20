@@ -1,0 +1,381 @@
+import os
+os.environ["CTK_DISABLE_WINDOWS_TITLEBAR_COLOR"] = "1"
+
+import json
+import threading
+from pathlib import Path
+
+import requests
+import customtkinter as ctk
+
+
+# ================= НАСТРОЙКИ =================
+
+CARD = ("#ffffff", "#1a1a1a")
+HOVER = ("#f3f3f3", "#242424")
+TEXT_SECONDARY = ("gray40", "gray60")
+GREEN = "#22c55e"
+RED = "#ef4444"
+
+API_KEY = "9dc1d5db2ecd4e82a3030153141ae06b"
+DATA_FILE = Path("state.json")
+
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+
+# ================= СОСТОЯНИЕ =================
+
+class State:
+
+    def __init__(self):
+        self.active_menu = "dashboard"
+        self.sort_mode = "rank"
+        self.live = False
+        self.favorites = []
+        self.portfolio = {}
+
+    def load(self):
+
+        if DATA_FILE.exists():
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+                self.favorites = data.get("favorites", [])
+                self.portfolio = data.get("portfolio", {})
+
+    def save(self):
+
+        data = {
+            "favorites": self.favorites,
+            "portfolio": self.portfolio
+        }
+
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+
+
+# ================= API =================
+
+class CoinMarketAPI:
+
+    URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+
+    @staticmethod
+    def get_coins(limit=50):
+
+        headers = {"X-CMC_PRO_API_KEY": API_KEY}
+        params = {"start": "1", "limit": str(limit), "convert": "USD"}
+
+        response = requests.get(CoinMarketAPI.URL, headers=headers, params=params)
+        response.raise_for_status()
+
+        return response.json()["data"]
+
+
+# ================= ПРИЛОЖЕНИЕ =================
+
+class App(ctk.CTk):
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.title("Crypto Tracker")
+        self.geometry("1200x720")
+
+        self.app_state = State()
+        self.app_state.load()
+
+        self.coins = []
+        self.filtered_coins = []
+
+        self.build_ui()
+        self.switch_menu("dashboard")
+
+        self.load_data()
+
+    # ================= UI =================
+
+    def build_ui(self):
+
+        self.sidebar = ctk.CTkFrame(self, width=250)
+        self.sidebar.pack(side="left", fill="y")
+
+        ctk.CTkLabel(self.sidebar, text="DELTA",
+                     font=ctk.CTkFont(size=22, weight="bold")).pack(pady=30)
+
+        self.btn_dashboard = ctk.CTkButton(self.sidebar, text="Dashboard",
+                                           command=lambda: self.switch_menu("dashboard"))
+        self.btn_dashboard.pack(fill="x", padx=20, pady=5)
+
+        self.btn_portfolio = ctk.CTkButton(self.sidebar, text="Portfolio",
+                                           command=lambda: self.switch_menu("portfolio"))
+        self.btn_portfolio.pack(fill="x", padx=20, pady=5)
+
+        self.btn_favorites = ctk.CTkButton(self.sidebar, text="Favorites",
+                                           command=lambda: self.switch_menu("favorites"))
+        self.btn_favorites.pack(fill="x", padx=20, pady=5)
+
+        self.main = ctk.CTkFrame(self)
+        self.main.pack(side="right", expand=True, fill="both", padx=20, pady=20)
+
+        self.header = ctk.CTkFrame(self.main)
+        self.header.pack(fill="x", pady=(0, 10))
+
+        self.live_switch = ctk.CTkSwitch(self.header, text="Live", command=self.toggle_live)
+        self.live_switch.pack(side="left", padx=10)
+
+        self.sort_menu = ctk.CTkOptionMenu(
+            self.header,
+            values=["Rank", "Price", "Change"],
+            command=self.change_sort
+        )
+        self.sort_menu.pack(side="right", padx=10)
+
+        self.search_entry = ctk.CTkEntry(self.main, placeholder_text="Search...")
+        self.search_entry.pack(fill="x", pady=10)
+        self.search_entry.bind("<KeyRelease>", self.search)
+
+        self.container = ctk.CTkScrollableFrame(self.main)
+        self.container.pack(expand=True, fill="both")
+
+    # ================= MENU =================
+
+    def switch_menu(self, name):
+
+        self.app_state.active_menu = name
+
+        for btn in [self.btn_dashboard, self.btn_portfolio, self.btn_favorites]:
+            btn.configure(fg_color="transparent")
+
+        if name == "dashboard":
+            self.btn_dashboard.configure(fg_color=("gray75", "gray25"))
+            self.show_dashboard()
+
+        elif name == "portfolio":
+            self.btn_portfolio.configure(fg_color=("gray75", "gray25"))
+            self.show_portfolio()
+
+        elif name == "favorites":
+            self.btn_favorites.configure(fg_color=("gray75", "gray25"))
+            self.show_favorites()
+
+    # ================= DATA =================
+
+    def load_data(self):
+        threading.Thread(target=self.fetch_data, daemon=True).start()
+
+    def fetch_data(self):
+
+        try:
+            data = CoinMarketAPI.get_coins()
+        except Exception as error:
+            self.after(0, lambda: self.show_error(str(error)))
+            return
+
+        self.coins = data
+        self.filtered_coins = data.copy()
+
+        self.after(0, lambda: self.switch_menu(self.app_state.active_menu))
+
+    # ================= LIVE =================
+
+    def toggle_live(self):
+
+        self.app_state.live = not self.app_state.live
+
+        if self.app_state.live:
+            self.auto_refresh()
+
+    def auto_refresh(self):
+
+        if self.app_state.live:
+            self.load_data()
+            self.after(60000, self.auto_refresh)
+
+    # ================= SORT =================
+
+    def change_sort(self, choice):
+
+        if choice == "Price":
+            self.filtered_coins.sort(key=lambda x: x["quote"]["USD"]["price"], reverse=True)
+
+        elif choice == "Change":
+            self.filtered_coins.sort(key=lambda x: x["quote"]["USD"]["percent_change_24h"], reverse=True)
+
+        else:
+            self.filtered_coins = self.coins.copy()
+
+        self.show_dashboard()
+
+    # ================= ЭКРАНЫ =================
+
+    def clear_container(self):
+        for widget in self.container.winfo_children():
+            widget.destroy()
+
+    def show_error(self, text):
+        self.clear_container()
+        ctk.CTkLabel(self.container, text=text, text_color="red").pack(pady=20)
+
+    def show_dashboard(self):
+
+        self.clear_container()
+
+        if not self.coins:
+            return
+
+        total_balance = self.calculate_total_balance()
+
+        balance_frame = ctk.CTkFrame(self.container, fg_color="transparent")
+        balance_frame.pack(fill="x", pady=(10, 25))
+
+        ctk.CTkLabel(balance_frame, text="Total Balance",
+                     text_color=TEXT_SECONDARY).pack(anchor="w")
+
+        ctk.CTkLabel(balance_frame, text=f"${total_balance:,.2f}",
+                     font=ctk.CTkFont(size=36, weight="bold")).pack(anchor="w")
+
+        for coin in self.filtered_coins[:20]:
+            self.create_coin_row(coin)
+
+    def show_favorites(self):
+
+        self.clear_container()
+
+        found = False
+
+        for coin in self.coins:
+            if coin["symbol"] in self.app_state.favorites:
+                self.create_coin_row(coin)
+                found = True
+
+        if not found:
+            ctk.CTkLabel(self.container, text="No favorites yet").pack(pady=40)
+
+    def show_portfolio(self):
+
+        self.clear_container()
+
+        for coin in self.coins:
+
+            symbol = coin["symbol"]
+            amount = self.app_state.portfolio.get(symbol, 0)
+
+            row = ctk.CTkFrame(self.container)
+            row.pack(fill="x", pady=5)
+
+            ctk.CTkLabel(row, text=symbol).pack(side="left", padx=10)
+
+            entry = ctk.CTkEntry(row, width=120)
+            entry.insert(0, str(amount))
+            entry.pack(side="right", padx=10)
+
+            entry.bind("<FocusOut>",
+                       lambda e, s=symbol, ent=entry: self.update_portfolio(s, ent.get()))
+
+    # ================= COIN ROW =================
+
+    def create_coin_row(self, coin):
+
+        symbol = coin["symbol"]
+        name = coin["name"]
+        price = coin["quote"]["USD"]["price"]
+        change = coin["quote"]["USD"]["percent_change_24h"]
+
+        color = GREEN if change > 0 else RED
+
+        card = ctk.CTkFrame(self.container, fg_color=CARD,
+                            corner_radius=14, border_width=1, border_color=color)
+        card.pack(fill="x", pady=6, padx=2)
+
+        def on_enter(e):
+            card.configure(fg_color=HOVER)
+
+        def on_leave(e):
+            card.configure(fg_color=CARD)
+
+        card.bind("<Enter>", on_enter)
+        card.bind("<Leave>", on_leave)
+
+        left = ctk.CTkFrame(card, fg_color="transparent")
+        left.pack(side="left", padx=15, pady=12)
+
+        ctk.CTkLabel(left, text=symbol,
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w")
+
+        ctk.CTkLabel(left, text=name,
+                     text_color=TEXT_SECONDARY,
+                     font=ctk.CTkFont(size=12)).pack(anchor="w")
+
+        right = ctk.CTkFrame(card, fg_color="transparent")
+        right.pack(side="right", padx=15)
+
+        ctk.CTkLabel(right, text=f"${price:,.2f}",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="e")
+
+        ctk.CTkLabel(right, text=f"{change:.2f}%",
+                     text_color=color).pack(anchor="e")
+
+        star = "★" if symbol in self.app_state.favorites else "☆"
+
+        ctk.CTkButton(card, text=star, width=32,
+                      fg_color="transparent",
+                      command=lambda s=symbol: self.toggle_favorite(s)
+                      ).place(relx=1, x=-40, y=10)
+
+    # ================= LOGIC =================
+
+    def toggle_favorite(self, symbol):
+
+        if symbol in self.app_state.favorites:
+            self.app_state.favorites.remove(symbol)
+        else:
+            self.app_state.favorites.append(symbol)
+
+        self.app_state.save()
+        self.switch_menu(self.app_state.active_menu)
+
+    def update_portfolio(self, symbol, value):
+
+        try:
+            self.app_state.portfolio[symbol] = float(value)
+            self.app_state.save()
+        except ValueError:
+            pass
+
+    def calculate_total_balance(self):
+
+        total = 0
+
+        for coin in self.coins:
+
+            symbol = coin["symbol"]
+
+            if symbol in self.app_state.portfolio:
+
+                amount = self.app_state.portfolio[symbol]
+                price = coin["quote"]["USD"]["price"]
+
+                total += amount * price
+
+        return total
+
+    def search(self, event):
+
+        query = self.search_entry.get().lower()
+
+        self.filtered_coins = [
+            coin for coin in self.coins
+            if query in coin["name"].lower()
+        ]
+
+        self.switch_menu("dashboard")
+
+
+# ================= ЗАПУСК =================
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()
